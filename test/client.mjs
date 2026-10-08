@@ -106,6 +106,7 @@ function installDom() {
     window,
     FakeMediaRecorder,
     tracks,
+    stream,
     setDenied: (value) => { denied = value },
   }
 }
@@ -881,6 +882,26 @@ async function suite() {
   await otherMic.unmount()
   await recoveryView.unmount()
 
+  // --- requesting phase keeps sidebar indicator hidden while origin is mounted -
+  let resolveStream
+  const origGetUserMedia = window.navigator.mediaDevices.getUserMedia
+  window.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { resolveStream = () => resolve(dom.stream) })
+  const requestingContext = await mockContext({ ...answers, ...rowsFor({ id: 'session-requesting', blank: true }) })
+  exports.apply(requestingContext)
+  const requestingMic = requestingContext.registrations.find(e => e.slot === 'conversation.input.activity')
+  const requestingProps = voiceProps()
+  requestingProps.props.sessionId = 'session-requesting'
+  const requestingView = await mount(requestingMic.Component, requestingProps.props)
+  await click(requestingView.act, requestingView.container.querySelector('button'))
+  const requestingSidebarSlot = requestingContext.registrations.find(e => e.slot === 'sidebar.footer.action')
+  const requestingSidebarView = await mount(requestingSidebarSlot.Component, { wide: true, t: key => key })
+  assert.equal(requestingSidebarView.container.querySelector('.ovo_recovery'), null, 'sidebar indicator is hidden during mic request while origin is mounted')
+  await requestingView.act(async () => resolveStream())
+  await settle(requestingView.act)
+  window.navigator.mediaDevices.getUserMedia = origGetUserMedia
+  await dismiss(requestingView)
+  await requestingSidebarView.unmount()
+
   const removedContext = await mockContext({ ...answers, ...rowsFor({ id: 'session-blank', blank: true }) })
   const removedView = await dictate(removedContext, 'session-blank')
   const removedIndicator = await mount(removedContext.registrations.find(e => e.slot === 'sidebar.footer.action').Component, { wide: false, t: key => key })
@@ -902,8 +923,9 @@ async function suite() {
   await settle(removedFlightView.act)
   assert.equal(typeof resolveRemovedTranscription, 'function')
   const flightIndicator = await mount(removedFlight.registrations.find(e => e.slot === 'sidebar.footer.action').Component, { wide: true, t: key => key })
-  assert.match(flightIndicator.container.textContent, /transcribingShort/, 'recovery stays visible throughout transcription')
+  assert.equal(flightIndicator.container.querySelector('.ovo_recovery'), null, 'sidebar indicator is hidden during transcription while origin is mounted')
   await removedFlightView.unmount()
+  assert.match(flightIndicator.container.textContent, /transcribingShort/, 'recovery stays visible throughout transcription')
   await flightIndicator.act(async () => removedFlight.removeSession('session-removed-flight'))
   await flightIndicator.act(async () => resolveRemovedTranscription(answers.transcribe))
   await settle(flightIndicator.act)
