@@ -386,7 +386,7 @@ async function suite() {
   const dispose = exports.apply(ctx)
   assert.deepEqual(
     ctx.registrations.map((entry) => entry.slot).sort(),
-    ['conversation.input.activity', 'settings.general.item', 'sidebar.footer.action'],
+    ['conversation.input.activity', 'settings.general.item'],
     'the control takes the activity seat after the model selector, and the row takes the General seat',
   )
   assert.equal(ctx.locales.length, 1, 'dictionaries register once')
@@ -850,69 +850,33 @@ async function suite() {
   assert.deepEqual(bare.created, [], 'no workspace service means no reservation, and no failure')
   await dismiss(bareView)
 
-  // --- filtered blank chats remain recoverable without a mounted origin -----
+  // --- filtered blank chats remain recoverable from foreign composers --------
 
   const recovery = await mockContext({ ...answers, ...rowsFor({ id: 'session-blank', blank: true }, { id: 'session-other', blank: false }) })
   const captureView = await dictate(recovery, 'session-blank')
-  const recoverySlot = recovery.registrations.find(e => e.slot === 'sidebar.footer.action')
-  assert.equal(recoverySlot.descriptor.id, 'openrouter-voice-recording', 'the plugin adds its own sidebar cell')
-  const recoveryView = await mount(recoverySlot.Component, { wide: true, t: key => key })
-  assert.equal(recoveryView.container.querySelector('.ovo_recovery'), null, 'sidebar indicator is hidden while the dictating chat is mounted on-screen')
   await captureView.unmount()
-  const visibleRows = recovery.sessions.list.getSnapshot().ids.filter(id => !recovery.sessions.list.getSnapshot().byId[id].blank || id === 'session-other')
-  assert.ok(!visibleRows.includes('session-blank'), 'the real sidebar rule hides the noncurrent blank')
-  assert.match(recoveryView.container.textContent, /recordingElsewhere/, 'root indicator survives hidden chat and unmounted composer')
-  assert.equal(recovery.calls.find(c => c.lease).lease.released, false)
-  await click(recoveryView.act, recoveryView.container.querySelector('[aria-label="returnRecording"]'))
-  assert.deepEqual(recovery.opened, ['session-blank'], 'return opens the exact hidden original, never the spare chat')
   const otherProps = voiceProps()
   otherProps.props.sessionId = 'session-other'
   const otherMic = await mount(recovery.registrations.find(e => e.slot === 'conversation.input.activity').Component, otherProps.props)
   const returnButton = otherMic.container.querySelector('[aria-label="returnRecording"]')
   assert.equal(returnButton.disabled, false, 'foreign composer offers recovery rather than a locked mic')
   await click(otherMic.act, returnButton)
-  assert.deepEqual(recovery.opened, ['session-blank', 'session-blank'])
+  assert.deepEqual(recovery.opened, ['session-blank'], 'return opens the exact hidden original, never the spare chat')
   const track = dom.tracks.at(-1)
-  await click(recoveryView.act, recoveryView.container.querySelector('[aria-label="cancel"]'))
-  await settle(recoveryView.act)
-  assert.ok(track.stopped >= 1, 'cancel from outside the origin releases audio')
+  await click(otherMic.act, otherMic.container.querySelector('[aria-label="cancel"]'))
+  await settle(otherMic.act)
+  assert.ok(track.stopped >= 1, 'cancel from foreign composer releases audio')
   assert.equal(recovery.calls.find(c => c.lease).lease.released, true)
-  assert.equal(recoveryView.container.querySelector('.ovo_recovery'), null, 'indicator goes away after cancellation')
   assert.equal(otherMic.container.querySelector('[aria-label="start"]').disabled, false, 'other chats can dictate again')
   await otherMic.unmount()
-  await recoveryView.unmount()
-
-  // --- requesting phase keeps sidebar indicator hidden while origin is mounted -
-  let resolveStream
-  const origGetUserMedia = window.navigator.mediaDevices.getUserMedia
-  window.navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { resolveStream = () => resolve(dom.stream) })
-  const requestingContext = await mockContext({ ...answers, ...rowsFor({ id: 'session-requesting', blank: true }) })
-  exports.apply(requestingContext)
-  const requestingMic = requestingContext.registrations.find(e => e.slot === 'conversation.input.activity')
-  const requestingProps = voiceProps()
-  requestingProps.props.sessionId = 'session-requesting'
-  const requestingView = await mount(requestingMic.Component, requestingProps.props)
-  await click(requestingView.act, requestingView.container.querySelector('button'))
-  const requestingSidebarSlot = requestingContext.registrations.find(e => e.slot === 'sidebar.footer.action')
-  const requestingSidebarView = await mount(requestingSidebarSlot.Component, { wide: true, t: key => key })
-  assert.equal(requestingSidebarView.container.querySelector('.ovo_recovery'), null, 'sidebar indicator is hidden during mic request while origin is mounted')
-  await requestingView.act(async () => resolveStream())
-  await settle(requestingView.act)
-  window.navigator.mediaDevices.getUserMedia = origGetUserMedia
-  await dismiss(requestingView)
-  await requestingSidebarView.unmount()
 
   const removedContext = await mockContext({ ...answers, ...rowsFor({ id: 'session-blank', blank: true }) })
   const removedView = await dictate(removedContext, 'session-blank')
-  const removedIndicator = await mount(removedContext.registrations.find(e => e.slot === 'sidebar.footer.action').Component, { wide: false, t: key => key })
   await removedView.unmount()
   const removedTrack = dom.tracks.at(-1)
-  await removedIndicator.act(async () => removedContext.removeSession('session-blank'))
-  await settle(removedIndicator.act)
+  removedContext.removeSession('session-blank')
   assert.ok(removedTrack.stopped >= 1, 'actual origin removal releases a background microphone')
   assert.equal(removedContext.calls.find(c => c.lease).lease.released, true)
-  assert.equal(removedIndicator.container.querySelector('.ovo_recovery'), null)
-  await removedIndicator.unmount()
 
   let resolveRemovedTranscription
   const removedFlight = await mockContext({ ...answers, ...rowsFor({ id: 'session-removed-flight', blank: true }),
@@ -922,18 +886,12 @@ async function suite() {
   await click(removedFlightView.act, removedFlightView.container.querySelector('[aria-label="start.send"]'))
   await settle(removedFlightView.act)
   assert.equal(typeof resolveRemovedTranscription, 'function')
-  const flightIndicator = await mount(removedFlight.registrations.find(e => e.slot === 'sidebar.footer.action').Component, { wide: true, t: key => key })
-  assert.equal(flightIndicator.container.querySelector('.ovo_recovery'), null, 'sidebar indicator is hidden during transcription while origin is mounted')
   await removedFlightView.unmount()
-  assert.match(flightIndicator.container.textContent, /transcribingShort/, 'recovery stays visible throughout transcription')
-  await flightIndicator.act(async () => removedFlight.removeSession('session-removed-flight'))
-  await flightIndicator.act(async () => resolveRemovedTranscription(answers.transcribe))
-  await settle(flightIndicator.act)
+  removedFlight.removeSession('session-removed-flight')
+  await resolveRemovedTranscription(answers.transcribe)
   assert.equal(removedFlight.calls.filter(c => c.content).length, 0, 'removed origins cannot receive a late transcript')
   assert.equal(removedFlight.calls.find(c => c.endpoint?.endsWith('/transcribe')).signal.aborted, true)
   assert.equal(removedFlight.calls.find(c => c.lease).lease.released, true)
-  assert.equal(flightIndicator.container.querySelector('.ovo_recovery'), null)
-  await flightIndicator.unmount()
 
   // --- the resident composer keeps the row expanded across tab switches -----
 
