@@ -1,0 +1,6 @@
+# Mount the self-contained OpenRouter voice plugin. It owns its own client
+# half (microphone control + model picker) and its own Connection channel, so
+# it needs no speech-to-text bundle and no other experimental package.
+- insert:
+    - id: openrouter-voice
+      name: 'dsh-openrouter-voice'

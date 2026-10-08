@@ -1,0 +1,7 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+overrides:
+  "@deepseek-ai/dsh-type-meta": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1"
