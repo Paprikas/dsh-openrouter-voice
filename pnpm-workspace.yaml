@@ -1,0 +1,12 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+overrides:
+  "@deepseek-ai/dsh-type-meta": "npm:@deepseek-ai/dsh-invariants@0.0.1-rc.1"
+  katex@>=0.11.0 <0.18.2: ^0.19.0
+  source-map-js@>=1.0.0 <1.2.2: ^1.2.2
+minimumReleaseAgeExclude:
+  - katex@0.19.0
+  - source-map-js@1.2.2
