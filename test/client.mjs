@@ -144,7 +144,7 @@ async function mockContext(answers) {
   const sessionWatchers = new Map()
   const removed = new Set()
   const inputs = new Map()
-  const emptyInput = { state: { getSnapshot: () => ({ draft: '', draftRev: 0, phase: 'plain' }) }, setDraft() {} }
+  const emptyInput = { state: { getSnapshot: () => ({ draft: '', draftRev: 0, phase: 'plain', attachmentIds: [] }) }, setDraft() {}, removeAttachment() { return false }, commitSend() {} }
   // The Session list and workspace rows the reuse rule reads: by default one
   // workspace holding one blank Session, the shape a fresh "New chat" has.
   const list = answers.list ?? {
@@ -180,7 +180,19 @@ async function mockContext(answers) {
     created,
     opened,
     setInput(sessionId, input) { inputs.set(sessionId, input) },
-    conversation: { input: { for: (scope) => inputs.get(scope.sessionId) ?? emptyInput } },
+    conversation: {
+      input: { for: (scope) => inputs.get(scope.sessionId) ?? emptyInput },
+      async sendSession(session, text, attachmentIds, mode, signal) {
+        calls.push({ sessionId: session.ctx?.sessionId ?? session.sessionId, sendSession: true, text, attachmentIds, mode, signal })
+        if (answers.sendSession) return answers.sendSession({ session, text, attachmentIds, mode, signal })
+        const content = [
+          ...attachmentIds.map((id) => ({ type: 'attachment', id })),
+          ...(text === '' ? [] : [{ type: 'text', text }]),
+        ]
+        const receipt = await session.prompt(content, mode, signal)
+        return receipt.ok ? { kind: 'success' } : { kind: 'error', text: receipt.error?.message }
+      },
+    },
     removeSession(sessionId) {
       removed.add(sessionId)
       delete list.byId[sessionId]
@@ -225,6 +237,7 @@ async function mockContext(answers) {
         calls.push({ lease, options })
         return {
           ready: Promise.resolve({ ctx: { sessionId }, session: {
+            sessionId,
             getSnapshot: () => ({ removed: removed.has(sessionId) }),
             subscribe(listener) {
               if (!sessionWatchers.has(sessionId)) sessionWatchers.set(sessionId, new Set())
@@ -329,7 +342,7 @@ function voiceProps(options = {}) {
   const inserted = []
   const submitted = []
   const activation = []
-  const control = { stuck: options.stuck === true, draft: options.draft ?? '', rev: 0, caret: (options.draft ?? '').length, attachments: [] }
+  const control = { stuck: options.stuck === true, draft: options.draft ?? '', rev: 0, caret: (options.draft ?? '').length, attachments: options.attachments ? [...options.attachments] : [] }
   const edit = (text, caret = text.length) => {
     control.draft = text
     control.caret = caret
@@ -340,6 +353,14 @@ function voiceProps(options = {}) {
     input: {
       state: { getSnapshot: () => ({ draft: control.draft, draftRev: control.rev, phase: 'plain', attachmentIds: control.attachments }) },
       setDraft: edit,
+      removeAttachment: (id) => {
+        control.attachments = control.attachments.filter((x) => x !== id)
+        return true
+      },
+      commitSend: (attachmentIds) => {
+        const submitted = new Set(attachmentIds)
+        control.attachments = control.attachments.filter((x) => !submitted.has(x))
+      },
     },
     inserted,
     submitted,
@@ -483,6 +504,27 @@ async function suite() {
   assert.equal(view.container.querySelector('[data-voice-activity]'), null, 'the control collapses after sending')
 
   await view.unmount()
+
+  // --- record and send with attached files ---------------------------------
+
+  const attachVoice = voiceProps({ draft: '', attachments: ['attachment-file-1', 'attachment-file-2'] })
+  ctx.setInput('session-1', attachVoice.input)
+  const attachView = await mount(mic.Component, attachVoice.props)
+  await click(attachView.act, attachView.container.querySelector('button'))
+  await settle(attachView.act)
+  assert.equal(attachView.container.querySelector('[data-voice-activity]').getAttribute('data-voice-activity'), 'recording')
+  await click(attachView.act, attachView.container.querySelector('button[aria-label="start.send"]'))
+  await settle(attachView.act)
+
+  const sendSessionCall = ctx.calls.find((c) => c.sendSession === true && c.sessionId === 'session-1')
+  assert.ok(sendSessionCall, 'the conversation.sendSession was invoked for draft with attachments')
+  assert.equal(sendSessionCall.text, 'hello world', 'voice transcript is passed as prompt text')
+  assert.deepEqual(sendSessionCall.attachmentIds, ['attachment-file-1', 'attachment-file-2'], 'attachments are attached to the send')
+  assert.equal(sendSessionCall.mode, 'queue')
+  assert.deepEqual(attachVoice.control.attachments, [], 'sent attachments are cleared from composer draft after send')
+  assert.equal(attachVoice.control.draft, '', 'draft is cleared')
+  assert.equal(attachView.container.querySelector('[data-voice-activity]'), null, 'the control collapses after send')
+  await attachView.unmount()
 
   // --- the recording outlives focus ------------------------------------------
 
@@ -835,7 +877,7 @@ async function suite() {
   })
   exports.apply(rejected)
   const rejectedMic = rejected.registrations.find(e => e.slot === 'conversation.input.activity')
-  const rejectedVoice = voiceProps({ stuck: true, draft: 'keep this draft' })
+  const rejectedVoice = voiceProps({ stuck: true, draft: 'keep this draft', attachments: ['keep-attachment'] })
   rejected.setInput('session-1', rejectedVoice.input)
   const rejectedView = await mount(rejectedMic.Component, rejectedVoice.props)
   await click(rejectedView.act, rejectedView.container.querySelector('button'))
@@ -843,8 +885,12 @@ async function suite() {
   await click(rejectedView.act, rejectedView.container.querySelector('button[aria-label="start.send"]'))
   await settle(rejectedView.act)
   assert.equal(rejectedView.container.querySelector('[role="status"]').title, 'hello world')
-  assert.equal(rejected.calls.find(c => c.content).content[0].text, 'keep this draft\nhello world')
+  assert.deepEqual(rejected.calls.find(c => c.content).content, [
+    { type: 'attachment', id: 'keep-attachment' },
+    { type: 'text', text: 'keep this draft\nhello world' },
+  ])
   assert.equal(rejectedVoice.control.draft, 'keep this draft', 'a rejected combined send never clears typed text')
+  assert.deepEqual(rejectedVoice.control.attachments, ['keep-attachment'], 'a rejected combined send never clears attachments')
   assert.equal(rejected.calls.find(c => c.lease).lease.released, true)
   await click(rejectedView.act, rejectedView.container.querySelector('button[aria-label="discard"]'))
   await rejectedView.unmount()
@@ -956,14 +1002,17 @@ async function suite() {
   recognizeCombined(answers.transcribe)
   await settle(foreignView.act)
   assert.deepEqual(combinedContext.calls.filter(c => c.content).map(c => [c.sessionId, c.content]), [
-    ['session-combined', [{ type: 'text', text: 'latest origin draft\nhello world' }]],
-  ], 'send combines the latest text with recognized speech exactly once in the origin')
+    ['session-combined', [
+      { type: 'attachment', id: 'origin-attachment' },
+      { type: 'text', text: 'latest origin draft\nhello world' },
+    ]],
+  ], 'send combines attachments and the latest text with recognized speech in the origin')
   assert.equal(combinedContext.calls.find(c => c.lease).lease.released, false, 'retention lasts until acknowledgement')
   combinedVoice.edit('new draft written during acknowledgement')
   acknowledgeCombined({ ok: true, value: { accepted: true } })
   await settle(foreignView.act)
   assert.equal(combinedVoice.control.draft, 'new draft written during acknowledgement', 'late typing is not cleared with an older send')
-  assert.deepEqual(combinedVoice.control.attachments, ['origin-attachment'], 'text sending does not drop unsent attachments')
+  assert.deepEqual(combinedVoice.control.attachments, [], 'sent attachments are cleared after admission')
   assert.equal(foreignVoice.control.draft, 'other tab draft', 'another chat remains completely untouched')
   assert.equal(combinedContext.calls.find(c => c.lease).lease.released, true)
   await foreignView.unmount()
