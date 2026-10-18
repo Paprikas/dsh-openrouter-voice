@@ -268,7 +268,32 @@ const audioBase64 = wave.toString('base64')
   })
   assert.equal(failed.result.ok, false)
   assert.equal(failed.result.error.code, 'provider-failed')
+  assert.equal(failed.result.error.details.retryable, false)
+  assert.equal(failed.result.error.details.status, 402)
   assert.match(failed.result.error.message, /HTTP 402\): insufficient credits/)
+
+  const serverError = await call(handler, 'transcribe', { audioBase64 }, {
+    fetchImpl: () => jsonResponse(502, { error: { message: 'Bad Gateway' } }),
+  })
+  assert.equal(serverError.result.ok, false)
+  assert.equal(serverError.result.error.code, 'provider-failed')
+  assert.equal(serverError.result.error.details.retryable, true)
+  assert.equal(serverError.result.error.details.status, 502)
+
+  const rateLimit = await call(handler, 'transcribe', { audioBase64 }, {
+    fetchImpl: () => jsonResponse(429, { error: { message: 'Rate limited' } }),
+  })
+  assert.equal(rateLimit.result.ok, false)
+  assert.equal(rateLimit.result.error.code, 'provider-failed')
+  assert.equal(rateLimit.result.error.details.retryable, true)
+  assert.equal(rateLimit.result.error.details.status, 429)
+
+  const networkError = await call(handler, 'transcribe', { audioBase64 }, {
+    fetchImpl: () => { throw new Error('fetch failed') },
+  })
+  assert.equal(networkError.result.ok, false)
+  assert.equal(networkError.result.error.code, 'network')
+  assert.equal(networkError.result.error.details.retryable, true)
 }
 
 {

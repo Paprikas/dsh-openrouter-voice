@@ -160,6 +160,7 @@ async function mockContext(answers) {
     'settings.section': { kind: 'list', scope: 'root' },
     'sidebar.footer.action': { kind: 'list', scope: 'root' },
     'plugins.bundle.config': { kind: 'keyed', scope: 'root' },
+    'sidebar.session.row.leading': { kind: 'list', scope: 'root' },
   } }, () => null)
   core.register({ name: 'main.conversation', scope: 'session-maybe', children: {
     'conversation.composer.bar': { kind: 'single', scope: 'session-maybe' },
@@ -389,6 +390,7 @@ function voiceProps(options = {}) {
 async function suite() {
   const dom = installDom()
   const { exports } = await loadClient()
+  exports.internals.runtime.retryDelayMs = 0
 
   assert.equal(typeof exports.apply, 'function')
   assert.deepEqual(exports.inject, ['connection', 'slots', 'locale', 'sessions', 'conversation'], 'only stable client services are required')
@@ -426,8 +428,8 @@ async function suite() {
   const dispose = exports.apply(ctx)
   assert.deepEqual(
     ctx.registrations.map((entry) => entry.slot).sort(),
-    ['conversation.input.activity', 'plugins.bundle.config'],
-    'the control takes the activity seat after the model selector, and the row takes the plugin config seat',
+    ['conversation.input.activity', 'plugins.bundle.config', 'sidebar.session.row.leading'],
+    'the control takes the activity seat after the model selector, the row takes the plugin config seat, and the session mark takes the sidebar leading seat',
   )
   assert.equal(ctx.locales.length, 1, 'dictionaries register once')
   assert.ok(ctx.locales[0].dictionaries.ru, 'Russian copy ships with the bundle')
@@ -945,6 +947,178 @@ async function suite() {
   assert.match(failingView.container.textContent, /permission/, 'a denied microphone reports the stock permission sentence')
   dom.setDenied(false)
   await failingView.unmount()
+
+  // --- automatic and manual retry on transcription failures -----------------
+
+  const { isRetryable, MAX_TRANSCRIBE_RETRIES } = exports.internals
+  assert.equal(MAX_TRANSCRIBE_RETRIES, 5)
+  assert.equal(isRetryable({ code: 'network' }), true)
+  assert.equal(isRetryable({ code: 'timeout' }), true)
+  assert.equal(isRetryable({ code: 'transport' }), true)
+  assert.equal(isRetryable({ code: 'no-connection' }), true)
+  assert.equal(isRetryable({ code: 'provider-failed', details: { retryable: true, status: 502 } }), true)
+  assert.equal(isRetryable({ code: 'provider-failed', details: { retryable: true, status: 429 } }), true)
+  assert.equal(isRetryable({ code: 'provider-failed', message: 'HTTP 503 Service Unavailable' }), true)
+  assert.equal(isRetryable({ code: 'provider-failed', details: { retryable: false, status: 401 } }), false)
+  assert.equal(isRetryable({ code: 'provider-failed', details: { retryable: false, status: 400 } }), false)
+  assert.equal(isRetryable({ code: 'invalid-audio' }), false)
+  assert.equal(isRetryable({ code: 'too-long' }), false)
+
+  // Test 1: Transient network error automatically retries and succeeds on attempt 2
+  let networkAttempts = 0
+  let capturedRetryText = ''
+  const retrySuccessContext = await mockContext({
+    ...answers,
+    transcribe: () => {
+      networkAttempts++
+      if (networkAttempts === 1) {
+        return { ok: false, error: { code: 'network', message: 'connection dropped' } }
+      }
+      return { ok: true, value: { text: 'retry succeeded', audioSeconds: 1, inferenceSeconds: 0.1, model: 'test' } }
+    },
+  })
+  exports.apply(retrySuccessContext)
+  const retrySuccessMic = retrySuccessContext.registrations.find((e) => e.slot === 'conversation.input.activity')
+  const retrySuccessVoice = voiceProps()
+  retrySuccessVoice.props.sessionId = 'session-retry-success'
+  retrySuccessContext.setInput('session-retry-success', retrySuccessVoice.input)
+  const retrySuccessView = await mount(retrySuccessMic.Component, retrySuccessVoice.props)
+  await click(retrySuccessView.act, retrySuccessView.container.querySelector('button'))
+  await settle(retrySuccessView.act)
+  await click(retrySuccessView.act, retrySuccessView.container.querySelector('button[aria-label="stop"]'))
+  await settle(retrySuccessView.act)
+  assert.equal(networkAttempts, 2, 'transcription automatically retried on network error')
+  assert.deepEqual(retrySuccessVoice.inserted, ['retry succeeded'], 'transcript inserted after successful retry')
+  await retrySuccessView.unmount()
+
+  // Test 2: Network error exhausts all 5 retries, preserves audio, and allows manual retry
+  let exhaustAttempts = 0
+  let allowManualSuccess = false
+  const retryExhaustContext = await mockContext({
+    ...answers,
+    transcribe: () => {
+      exhaustAttempts++
+      if (allowManualSuccess) {
+        return { ok: true, value: { text: 'manual retry succeeded', audioSeconds: 1, inferenceSeconds: 0.1, model: 'test' } }
+      }
+      return { ok: false, error: { code: 'network', message: 'persistently offline', details: { retryable: true } } }
+    },
+  })
+  exports.apply(retryExhaustContext)
+  const retryExhaustMic = retryExhaustContext.registrations.find((e) => e.slot === 'conversation.input.activity')
+  const retryExhaustVoice = voiceProps()
+  retryExhaustVoice.props.sessionId = 'session-retry-exhaust'
+  retryExhaustContext.setInput('session-retry-exhaust', retryExhaustVoice.input)
+  const retryExhaustView = await mount(retryExhaustMic.Component, retryExhaustVoice.props)
+  await click(retryExhaustView.act, retryExhaustView.container.querySelector('button'))
+  await settle(retryExhaustView.act)
+  await click(retryExhaustView.act, retryExhaustView.container.querySelector('button[aria-label="stop"]'))
+  await settle(retryExhaustView.act)
+  // 1 initial + 5 retries = 6 calls
+  assert.equal(exhaustAttempts, 6, 'initial call + 5 retries were attempted')
+  assert.equal(
+    retryExhaustView.container.querySelector('[data-voice-activity]').getAttribute('data-voice-activity'),
+    'feedback',
+    'after exhausting retries, it lands in feedback state',
+  )
+  assert.match(retryExhaustView.container.textContent, /failed/, 'reports the failure message')
+
+  // Both retry button and record again button are present because audio is preserved
+  const retryBtn = retryExhaustView.container.querySelector('button[aria-label="retry"]')
+  const recordAgainBtn = retryExhaustView.container.querySelector('button[aria-label="retryRecording"]')
+  assert.ok(retryBtn, 'retry button is displayed when audio is preserved')
+  assert.ok(recordAgainBtn, 'record again button is also displayed')
+
+  // Clicking retry re-attempts transcription of the preserved audio
+  allowManualSuccess = true
+  await click(retryExhaustView.act, retryBtn)
+  await settle(retryExhaustView.act)
+  assert.deepEqual(retryExhaustVoice.inserted, ['manual retry succeeded'], 'manual retry succeeded using preserved audio')
+  await retryExhaustView.unmount()
+
+  // Test 3: Cancel button discards the held audio and returns to idle
+  const discardContext = await mockContext({
+    ...answers,
+    transcribe: () => ({ ok: false, error: { code: 'provider-failed', message: 'unrecoverable', details: { retryable: false } } }),
+  })
+  exports.apply(discardContext)
+  const discardMic = discardContext.registrations.find((e) => e.slot === 'conversation.input.activity')
+  const discardVoice = voiceProps()
+  discardVoice.props.sessionId = 'session-discard'
+  discardContext.setInput('session-discard', discardVoice.input)
+  const discardView = await mount(discardMic.Component, discardVoice.props)
+  await click(discardView.act, discardView.container.querySelector('button'))
+  await settle(discardView.act)
+  await click(discardView.act, discardView.container.querySelector('button[aria-label="stop"]'))
+  await settle(discardView.act)
+  assert.equal(discardView.container.querySelector('[data-voice-activity]').getAttribute('data-voice-activity'), 'feedback')
+  assert.ok(discardView.container.querySelector('button[aria-label="retry"]'), 'retry button is present')
+  await click(discardView.act, discardView.container.querySelector('button[aria-label="cancel"]'))
+  await settle(discardView.act)
+  assert.equal(discardView.container.querySelector('[data-voice-activity]'), null, 'cancelling discards held audio and restores idle mic trigger')
+  await discardView.unmount()
+
+  // Test 4: Multi-chat non-blocking: Chat 2 can record while Chat 1 is transcribing
+  let resolveChat1, resolveChat2
+  const multiContext = await mockContext({
+    ...answers,
+    transcribe: (payload) => new Promise((resolve) => {
+      if (!resolveChat1) resolveChat1 = resolve
+      else resolveChat2 = resolve
+    }),
+  })
+  exports.apply(multiContext)
+  const multiMic = multiContext.registrations.find((e) => e.slot === 'conversation.input.activity')
+  const multiMark = multiContext.registrations.find((e) => e.slot === 'sidebar.session.row.leading')
+
+  const chat1Voice = voiceProps()
+  chat1Voice.props.sessionId = 'chat-1'
+  multiContext.setInput('chat-1', chat1Voice.input)
+  const chat1View = await mount(multiMic.Component, chat1Voice.props)
+
+  // Start & stop in Chat 1
+  await click(chat1View.act, chat1View.container.querySelector('button[aria-label="start"]'))
+  await settle(chat1View.act)
+  await click(chat1View.act, chat1View.container.querySelector('button[aria-label="stop"]'))
+  await settle(chat1View.act)
+  assert.equal(chat1View.container.querySelector('[data-voice-activity]').getAttribute('data-voice-activity'), 'transcribing')
+
+  // Check sidebar mark for Chat 1: shows transcribing mark
+  const mark1View = await mount(multiMark.Component, { sessionId: 'chat-1', t: (k) => k })
+  assert.equal(mark1View.container.querySelector('[data-voice-mark]')?.getAttribute('data-voice-mark'), 'transcribing')
+
+  // Switch to Chat 2: microphone is NOT blocked, can start recording
+  const chat2Voice = voiceProps()
+  chat2Voice.props.sessionId = 'chat-2'
+  multiContext.setInput('chat-2', chat2Voice.input)
+  const chat2View = await mount(multiMic.Component, chat2Voice.props)
+  const chat2Trigger = chat2View.container.querySelector('button[aria-label="start"]')
+  assert.ok(chat2Trigger, 'Chat 2 displays the start recording trigger')
+  assert.equal(chat2Trigger.disabled, false, 'Chat 2 trigger is not disabled while Chat 1 transcribes')
+
+  // Start & stop in Chat 2
+  await click(chat2View.act, chat2Trigger)
+  await settle(chat2View.act)
+  await click(chat2View.act, chat2View.container.querySelector('button[aria-label="stop"]'))
+  await settle(chat2View.act)
+  assert.equal(chat2View.container.querySelector('[data-voice-activity]').getAttribute('data-voice-activity'), 'transcribing')
+
+  // Both transcriptions finish independently
+  resolveChat1({ ok: true, value: { text: 'hello chat 1', audioSeconds: 1, inferenceSeconds: 0.1, model: 'test' } })
+  resolveChat2({ ok: true, value: { text: 'hello chat 2', audioSeconds: 1, inferenceSeconds: 0.1, model: 'test' } })
+  await settle(chat1View.act)
+  await settle(chat2View.act)
+
+  assert.deepEqual(chat1Voice.inserted, ['hello chat 1'])
+  assert.deepEqual(chat2Voice.inserted, ['hello chat 2'])
+
+  // Sidebar mark clears after transcription finishes
+  await settle(mark1View.act)
+  assert.equal(mark1View.container.querySelector('[data-voice-mark]'), null, 'mark clears after completion')
+
+  await chat1View.unmount()
+  await chat2View.unmount()
+  await mark1View.unmount()
 
   // --- edits before recognition are normal, not draft conflicts --------------
 
