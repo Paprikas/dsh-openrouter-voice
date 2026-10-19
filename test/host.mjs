@@ -262,6 +262,21 @@ const audioBase64 = wave.toString('base64')
 }
 
 {
+  const webmBytes = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81])
+  const webmBase64 = webmBytes.toString('base64')
+  const { handler } = mount({ credentials: { resolve: async () => ({ value: 'sk-or-secret' }) } })
+  const { result, calls } = await call(handler, 'transcribe', { audioBase64: webmBase64, format: 'webm', duration: 3.5 }, {
+    fetchImpl: () => jsonResponse(200, { text: 'webm audio test' }),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.value.text, 'webm audio test')
+  assert.equal(result.value.audioSeconds, 3.5)
+  const body = JSON.parse(calls[0].options.body)
+  assert.equal(body.input_audio.format, 'webm')
+  assert.equal(body.input_audio.data, webmBase64)
+}
+
+{
   const { handler } = mount({ credentials: { resolve: async () => ({ value: 'sk-or-secret' }) } })
   const failed = await call(handler, 'transcribe', { audioBase64 }, {
     fetchImpl: () => jsonResponse(402, { error: { message: 'insufficient credits' } }),

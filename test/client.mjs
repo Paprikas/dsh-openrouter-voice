@@ -528,6 +528,31 @@ async function suite() {
   assert.equal(attachView.container.querySelector('[data-voice-activity]'), null, 'the control collapses after send')
   await attachView.unmount()
 
+  // --- compressed webm direct pass-through -----------------------------------
+
+  const webmBytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x02, 0x03, 0x04])
+  const prevRecorderStop = dom.FakeMediaRecorder.prototype.stop
+  dom.FakeMediaRecorder.prototype.stop = function () {
+    this.state = 'inactive'
+    this.ondataavailable?.({ data: new window.Blob([webmBytes], { type: 'audio/webm' }) })
+    this.onstop?.()
+  }
+
+  const webmVoice = voiceProps()
+  ctx.setInput('session-webm', webmVoice.input)
+  webmVoice.props.sessionId = 'session-webm'
+  const webmView = await mount(mic.Component, webmVoice.props)
+  await click(webmView.act, webmView.container.querySelector('button'))
+  await settle(webmView.act)
+  await click(webmView.act, webmView.container.querySelector('button[aria-label="stop"]'))
+  await settle(webmView.act)
+  const webmCall = ctx.calls.filter((e) => e.endpoint === 'openrouter-voice/transcribe' && e.payload?.format === 'webm').pop()
+  assert.ok(webmCall, 'the webm recording is passed directly without wav re-encoding')
+  assert.equal(webmCall.payload.format, 'webm')
+  assert.equal(webmCall.payload.audioBase64, Buffer.from(webmBytes).toString('base64'))
+  await webmView.unmount()
+  dom.FakeMediaRecorder.prototype.stop = prevRecorderStop
+
   // --- the recording outlives focus ------------------------------------------
 
   const focusVoice = voiceProps()
