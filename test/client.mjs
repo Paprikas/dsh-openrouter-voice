@@ -985,8 +985,10 @@ async function suite() {
   const retrySuccessView = await mount(retrySuccessMic.Component, retrySuccessVoice.props)
   await click(retrySuccessView.act, retrySuccessView.container.querySelector('button'))
   await settle(retrySuccessView.act)
-  await click(retrySuccessView.act, retrySuccessView.container.querySelector('button[aria-label="stop"]'))
-  await settle(retrySuccessView.act)
+  await retrySuccessView.act(async () => {
+    await click(retrySuccessView.act, retrySuccessView.container.querySelector('button[aria-label="stop"]'))
+    await settle(retrySuccessView.act)
+  })
   assert.equal(networkAttempts, 2, 'transcription automatically retried on network error')
   assert.deepEqual(retrySuccessVoice.inserted, ['retry succeeded'], 'transcript inserted after successful retry')
   await retrySuccessView.unmount()
@@ -1012,8 +1014,10 @@ async function suite() {
   const retryExhaustView = await mount(retryExhaustMic.Component, retryExhaustVoice.props)
   await click(retryExhaustView.act, retryExhaustView.container.querySelector('button'))
   await settle(retryExhaustView.act)
-  await click(retryExhaustView.act, retryExhaustView.container.querySelector('button[aria-label="stop"]'))
-  await settle(retryExhaustView.act)
+  await retryExhaustView.act(async () => {
+    await click(retryExhaustView.act, retryExhaustView.container.querySelector('button[aria-label="stop"]'))
+    await settle(retryExhaustView.act)
+  })
   // 1 initial + 5 retries = 6 calls
   assert.equal(exhaustAttempts, 6, 'initial call + 5 retries were attempted')
   assert.equal(
@@ -1031,8 +1035,10 @@ async function suite() {
 
   // Clicking retry re-attempts transcription of the preserved audio
   allowManualSuccess = true
-  await click(retryExhaustView.act, retryBtn)
-  await settle(retryExhaustView.act)
+  await retryExhaustView.act(async () => {
+    await click(retryExhaustView.act, retryBtn)
+    await settle(retryExhaustView.act)
+  })
   assert.deepEqual(retryExhaustVoice.inserted, ['manual retry succeeded'], 'manual retry succeeded using preserved audio')
   await retryExhaustView.unmount()
 
